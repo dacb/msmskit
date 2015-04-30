@@ -16,7 +16,7 @@ PROTEIN_PROPHET=/usr/local/tpp/bin/ProteinProphet
 PROTXML2HTML=/usr/local/tpp/cgi-bin/protxml2html.pl
 SEND_MAIL=/Users/dacb/msmskit/bin/send_mail
 
-PEPPROB=0.6
+PEPPROB=0.85
 
 cd $DATAROOT
 
