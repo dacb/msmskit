@@ -1,0 +1,39 @@
+#!/bin/bash
+
+# background script order of operations
+DIRS="Erik dacb Tony"
+
+SLEEP_SECONDS=600
+
+function core {
+	archive_RAW_files -v
+	archive_mzXML_files -v
+#	archive_job_files -v
+#	archive_analysis_files -v
+#	archive_comparison_files -v
+	
+	for dir in $DIRS
+	do
+		printf "\n--------------------------\n$dir"
+		catalog_RAW_files -d $dir
+		catalog_experiments -d $dir
+		upload_for_analysis -v
+		poll_for_analysis -v
+		analyze_replicates -d $dir
+		join_replicates_for_conditions -d $dir
+		compare_conditions_for_experiments -d $dir
+	done
+}
+
+i=0
+
+while true
+do
+	i=$(($i + 1))
+	echo round $i is commencing
+
+	core
+
+	echo round $i is complete, sleeping
+	sleep $SLEEP_SECONDS
+done

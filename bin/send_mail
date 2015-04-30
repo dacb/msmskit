@@ -1,0 +1,14 @@
+#!/bin/bash
+
+if [ $# -ne 2 ]
+then
+        echo "usage: $0 <path> <subject>"
+        exit 1
+fi
+
+FPATH=$1
+SUBJECT=$2
+
+email=`echo "CALL get_owner('$FPATH');" | mysql -s msmskit | awk '{ print $2 }'`
+
+#mail -s "MSMSKIT: $SUBJECT" -c "dacb@uw.edu" $email

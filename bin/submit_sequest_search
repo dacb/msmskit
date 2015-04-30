@@ -1,0 +1,147 @@
+#!/bin/bash
+#
+# Copyright (C) 2010
+# David A. C. Beck
+# dacb@u.washington.edu
+# Chemical Engineering & eScience Institute
+# University of Washington, Seattle
+#
+# Date: 11/03/2010
+# See version and usage information below
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+PROGNAME=${0##*/}
+PROGVERSION=0.9.3
+
+# setup defaults
+SEQUEST=/gscratch/esci/dacb/sequest/sequest.2011.01.1
+SEQUEST_PARAMS=sequest.params
+
+usage()
+{
+cat << EOF
+
+Usage: $0 [options] <filename of mzXML | mzXML.gz> [ ... ]
+
+This script submits to the queuing system, a SEQUEST search of mzXML and mzXML.gz 
+files passed as arguments against the FASTA database defined in the sequest.params 
+file.  The location of the params file must either be in the current working directory 
+(default) where it is names 'sequest.params' or passed as an argument (see OPTIONS).
+
+Options:
+EOF
+cat << EOF | column -s\& -t
+  -h|--help & Show this message
+  -s|--sequest-params <sequest.params>& Full pathname to the sequest parameter file
+  -v|--version & Show version information
+  -n|--no-submit & Create job files but do not submit them
+EOF
+}
+
+# parse arguments
+SHORTOPTS="hs:vn"
+LONGOPTS="help,sequest-params:,version,no-submit"
+ARGS=$(getopt -s bash --options $SHORTOPTS --longoptions $LONGOPTS --name $PROGNAME -- "$@")
+if [ $? != 0 ]; then usage; exit 1; fi
+eval set -- "$ARGS"
+# loop through options
+while true; do
+	case $1 in
+		-h|--help)
+			usage
+			exit 0
+			;;
+		-v|--version)
+			echo "$PROGVERSION"
+			exit 0
+			;;
+		-s|--sequest-params)
+			SEQUEST_PARAMS=$2
+			shift 2
+			;;
+		-n|--no-submit)
+			NO_SUBMIT=1
+			shift
+			;;
+		--) 
+			shift
+			break
+			;;
+		*) 
+			shift
+			break
+			;;
+	esac
+done
+
+# setup job files
+for mzFile do 
+	mzFilePrefix=`echo $mzFile | sed -e "s/.mzXML.gz//g" -e "s/.mzXML//g"`
+	if [[ "$mzFile" == *.mzXML ]]; then
+		mzFileDecompress=
+		mzFileDecompressRemove=
+	elif [[ "$mzFile" == *.mzXML.gz ]]; then
+		mzFileDecompress="gunzip -c $mzFile > $mzFilePrefix.mzXML"
+		mzFileDecompressRemove="\rm -rf $mzFilePrefix.mzXML"
+	else
+		echo "error: unexpected file type (not mzXML or mzXML.gz): $mzFile"
+		usage
+		exit 1
+	fi
+
+	jobFile=$mzFilePrefix.job
+	jobLogFile=$jobFile.log
+	jobIdFile=$jobFile.id
+
+
+cat << EOF > $jobFile
+#!/bin/bash
+
+#PBS -N $mzFilePrefix
+#PBS -d `pwd`
+#PBS -j oe
+#PBS -o $jobLogFile
+#PBS -l walltime=999:99:99,mem=8gb,nodes=1:ppn=8,feature=8core
+#PBS -W group_list=hyak-hackett
+
+# perform search
+$mzFileDecompress
+date
+$SEQUEST -P$SEQUEST_PARAMS $mzFilePrefix.mzXML 
+date
+$mzFileDecompressRemove
+
+# convert search to pep.xml
+Out2XML $mzFilePrefix 10 -P$SEQUEST_PARAMS
+tar -czf $mzFilePrefix.tgz $mzFilePrefix
+\rm -rf $mzFilePrefix
+EOF
+
+	jobid=`qsub $jobFile`
+	echo $mzfile $mzFilePrefix $mzFilePrefix.job $jobid
+done
+
+exit
+
+	if ( ! $no_submit ) then
+		set jobid = `msub $jobfile`
+		echo $jobid > $jobidfile
+	else
+		set jobid = ""
+	endif
+
+end
+

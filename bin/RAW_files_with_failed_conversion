@@ -1,0 +1,14 @@
+#!/bin/bash
+
+if [ $# -eq 0 ]
+then
+	echo "CALL RAW_catalog_conversion_failed();" | mysql -s msmskit
+else
+	FILES=`echo "CALL RAW_catalog_conversion_failed();" | mysql -s msmskit`
+
+	for file in $FILES
+	do
+		echo $file
+		echo "CALL RAW_catalog_conversion_log('$file');" | mysql -s msmskit
+	done
+fi

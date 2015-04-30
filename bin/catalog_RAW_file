@@ -1,0 +1,54 @@
+#!/bin/bash
+
+CATALOG_RAW_FILE_CONVERSION=/Users/dacb/msmskit/bin/catalog_RAW_file_conversion
+CATALOG_RAW_FILE_ANALYSIS=/Users/dacb/msmskit/bin/catalog_RAW_file_analysis
+
+if [ $# -ne 3 ]
+then
+        echo "usage: $0 <silent flag, 0 or 1> <root directory> <RAW file relative to root>"
+        exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+RAWFILE=$3
+
+in_catalog=`echo "CALL RAW_in_catalog('$RAWFILE', @in_catalog); SELECT @in_catalog;" | mysql -s msmskit`
+
+files_added=
+
+# the RAW file is not in the catalog, let's add it
+if [ $in_catalog -eq 0 ]
+then
+	cd $DATAROOT
+
+	datetime=`stat -f "%c" $RAWFILE`
+	md5file=$RAWFILE.md5
+
+	if [ $SILENT -eq 0 ]
+	then
+		echo adding $RAWFILE $md5file
+	fi
+
+	echo "CALL RAW_catalog_add('$RAWFILE', FROM_UNIXTIME($datetime));" | mysql -s msmskit
+	if [ ! -f $md5file ]
+	then
+		if [ $SILENT -eq 0 ]
+		then
+			echo creating md5sum file $m5file
+		fi
+		md5 -r $RAWFILE > $md5file
+	fi
+	datetime=`stat -f "%c" $md5file`
+	awk -v RAWFILE="$RAWFILE" -v datetime="$datetime" '{ printf("CALL RAW_catalog_md5sum(\"%s\", \"%s\", FROM_UNIXTIME(%s));\n", RAWFILE, $1, datetime); }' $md5file | mysql -s msmskit
+
+	$CATALOG_RAW_FILE_CONVERSION $SILENT $DATAROOT $RAWFILE
+
+	$CATALOG_RAW_FILE_ANALYSIS $SILENT $DATAROOT $RAWFILE
+#else
+#	if [ $SILENT -eq 0 ]
+#	then
+#		echo already found $RAWFILE
+#	fi
+fi
+

@@ -1,0 +1,279 @@
+#!/bin/bash
+#
+# Copyright (C) 2010
+# David A. C. Beck
+# dacb@u.washington.edu
+# Chemical Engineering & eScience Institute
+# University of Washington, Seattle
+#
+# Date: 11/03/2010
+# See version and usage information below
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+PROGNAME=${0##*/}
+PROGVERSION=0.9.2
+
+# setup defaults and statics
+SILENT=0
+DATAROOT=/Volumes/Drobo1
+FIND_CONDITIONS_WITH_ANALYZED_REPLICATES=/Users/dacb/msmskit/bin/find_conditions_with_analyzed_replicates
+CATALOG_CONDITION_JOIN=/Users/dacb/msmskit/bin/catalog_condition_join
+SEND_MAIL=/Users/dacb/msmskit/bin/send_mail
+
+# usage message
+usage()
+{
+cat << EOF
+
+Usage: $0 [options]
+
+This script joins replicate data for completely analyzed conditions.
+
+Options:
+EOF
+cat << EOF | column -s\& -t
+  -h|--help & Show this message
+  -v|--version & Show version information
+  -s|--silent & Run in silent mode (no output log)
+  -d|--dir <directory> & Path of directory to be searched relative to $DATAROOT
+EOF
+}
+
+# parse arguments
+SHORTOPTS="hvsd:"
+LONGOPTS="help,version,silent,dir:"
+ARGS=$(getopt -s bash --options $SHORTOPTS --longoptions $LONGOPTS --name $PROGNAME -- "$@")
+if [ $? != 0 ]; then usage; exit 1; fi
+eval set -- "$ARGS"
+# loop through options
+while true; do
+	case $1 in
+		-h|--help)
+			usage
+			exit 0
+			;;
+		-v|--version)
+			echo "$PROGVERSION"
+			exit 0
+			;;
+		-s|--silent)
+			SILENT=1
+			shift
+			;;
+		-d|--dir)
+			DIR=$2
+			shift 2
+			;;
+		--) 
+			shift
+			break
+			;;
+		*) 
+			shift
+			break
+			;;
+	esac
+done
+
+if [ -z "${DIR+xxx}" ]; then
+	usage
+	exit 1
+fi
+
+cd $DATAROOT
+
+complete_conditions=`$FIND_CONDITIONS_WITH_ANALYZED_REPLICATES | awk -v prefix="$DIR" '{ if (substr($0, 1, length(prefix)) == prefix) print $1 }'`
+
+for condition in $complete_conditions
+do
+	# list of replicates for this condition
+	replicates=`echo "CALL replicates_in_condition('$condition');" | mysql -s msmskit`
+
+	# create a SQL file with join commands
+	sqlfile=$condition/join_replicates.sql
+	# output will be in this tab delimited Excel compatible file
+	tabfile=$condition/replicates.tab
+	# error output will go to this file
+	logfile=$condition/join_replicates.log
+
+	if [ -e $sqlfile -a -e $tabfile ]
+	then
+		if [ $SILENT -eq 0 ]
+		then
+			echo joined replicate file $tabfile already exists, skipping condition $condition
+		fi
+		continue
+	else	
+		if [ $SILENT -eq 0 ]
+		then
+			echo $condition
+		fi
+	fi
+
+	echo "# $condition" > $sqlfile
+	header=""
+
+	# SQL commands to import protein prophet results to SQL 
+	for replicate in $replicates
+	do
+		if [ $SILENT -eq 0 ]
+		then
+			echo "-- $replicate"
+		fi
+		if [ ! -r $replicate/interact.prot.tab ]
+		then
+			echo "condition $condition has replicate $replicate that is flagged as complete but"
+			echo "    $replicate/interact.prot.tab does not exist!"
+			exit 1
+		fi
+		table=`basename $replicate`
+		# create header text
+		header="$header, '${table}_protein_probability', '${table}_percent_coverage', '${table}_num_unique_peps', '${table}_tot_indep_spectra'"
+		# fill in the load table template for table
+cat << EOF >> $sqlfile
+
+# $replicate
+CREATE TEMPORARY TABLE $table (
+	entry_no			INTEGER,
+	group_probability		FLOAT,
+	protein				VARCHAR(64),
+	protein_link			LONGTEXT,
+	protein_probability		FLOAT,
+	percent_coverage		FLOAT,
+	num_unique_peps			INTEGER,
+	tot_indep_spectra		INTEGER,
+	percent_share_of_spectrum_ids	FLOAT,
+	description			VARCHAR(256),
+	protein_molecular_weight	FLOAT,
+	protein_length			INTEGER,
+	is_nondegenerate_evidence	CHAR(1),
+	weight				FLOAT,
+	precursor_ion_charge		INTEGER,
+	peptide_sequence		VARCHAR(128),
+	peptide_link			LONGTEXT,
+	nsp_adjusted_probability	FLOAT,
+	initial_probability		FLOAT,
+	n_tol_termini			INTEGER,
+	n_sibling_peptides_bin		INTEGER,
+	n_instances			INTEGER,
+	peptide_group_designator	CHAR(1),
+	INDEX(protein),
+	INDEX(protein_probability),
+	INDEX(is_nondegenerate_evidence),
+	INDEX(nsp_adjusted_probability),
+	INDEX(initial_probability)
+);
+LOAD DATA INFILE '$DATAROOT/$replicate/interact.prot.tab'
+	INTO TABLE $table FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\t'
+	IGNORE 2 LINES
+;
+# delete blank lines
+DELETE FROM $table WHERE ISNULL(protein);
+# delete lines with protein = 'protien'
+DELETE FROM $table WHERE protein = 'protein';
+# drop duplicate rows (from peptides) to get one row per protein
+ALTER IGNORE TABLE $table ADD UNIQUE INDEX dupidx (protein);
+ALTER TABLE $table DROP INDEX dupidx;
+
+EOF
+	done
+
+cat << EOF >> $sqlfile
+# create another temporary table with all the DISTINCT proteins observed in all replicates
+CREATE TEMPORARY TABLE proteins (
+	protein	VARCHAR(64) PRIMARY KEY NOT NULL
+) SELECT DISTINCT protein FROM (
+EOF
+	i=1
+	# list each replicate table
+	for replicate in $replicates
+	do
+		table=`basename $replicate`
+		if [ $i -ne 1 ]
+		then
+cat << EOF >> $sqlfile
+	UNION
+EOF
+		fi
+cat << EOF >> $sqlfile
+		SELECT DISTINCT protein FROM $table
+EOF
+		i=$(($i + 1))
+	done
+
+cat << EOF >> $sqlfile
+) AS all_proteins;
+
+# output header for tab file
+SELECT 'protein' $header ;
+
+# now do the join
+SELECT DISTINCT proteins.protein
+EOF
+	for replicate in $replicates
+	do
+		table=`basename $replicate`
+cat << EOF >> $sqlfile
+	# $table
+		, IF(ISNULL($table.protein_probability), 0, $table.protein_probability)
+		, IF(ISNULL($table.percent_coverage), 0, $table.percent_coverage)
+		, IF(ISNULL($table.num_unique_peps), 0, $table.num_unique_peps)
+		, IF(ISNULL($table.tot_indep_spectra), 0, $table.tot_indep_spectra)
+EOF
+	done
+
+cat << EOF >> $sqlfile
+	FROM proteins
+EOF
+
+	for replicate in $replicates
+	do
+		table=`basename $replicate`
+cat << EOF >> $sqlfile
+		LEFT JOIN $table ON proteins.protein = $table.protein
+EOF
+	done
+
+cat << EOF >> $sqlfile
+	ORDER BY proteins.protein
+;
+EOF
+	if [ $SILENT -eq 0 ]
+	then
+		echo joining replicates...
+	fi
+
+	echo "CALL experiment_condition_analysis_running('$condition');" | mysql -s msmskit
+
+	$SEND_MAIL $condition "joining replicates for $condition" << EOF
+The replicates are being joined for condition: $condition
+
+Job:
+`cat $sqlfile`
+EOF
+
+	mysql -s msmskit < $sqlfile > $tabfile 2> $logfile
+
+	$SEND_MAIL $condition "joined replicates for $condition" << EOF
+The replicates have been joined for condition: $condition
+
+Log:
+`cat $logfile`
+EOF
+
+	echo "CALL experiment_condition_catalog_job('$condition', '$DATAROOT/$sqlfile', NOW(), '$DATAROOT/$logfile');" | mysql -s msmskit
+
+done

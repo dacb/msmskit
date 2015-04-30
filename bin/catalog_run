@@ -1,0 +1,48 @@
+#!/bin/bash
+
+if [ $# -ne 6 ]
+then
+        echo "usage: $0 <silent flag, 0 or 1> <root directory> <experiment path> <condition path relative to experiment path> <replicate path relative to condition path> <run path relative to replicate path>"
+        exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+EXP_PATH=$3
+COND_PATH=$4
+REP_PATH=$5
+RUN_PATH=$6
+
+cd $DATAROOT
+
+in_catalog=`echo "CALL replicate_run_in_catalog('$EXP_PATH/$COND_PATH/$REP_PATH', '$EXP_PATH/$COND_PATH/$REP_PATH/$RUN_PATH', @in_catalog); SELECT @in_catalog;" | mysql -s msmskit`
+
+# the run is not in the catalog, let's add it
+if [ $in_catalog -eq 0 ]
+then
+	run_path=$EXP_PATH/$COND_PATH/$REP_PATH/$RUN_PATH
+
+	if [ ! -d $run_path ]
+	then
+		if [ $SILENT -eq 0 ]
+		then
+			echo "!!! experiment $EXP_PATH condition $COND_PATH replicate $REP_PATH does not have a directory for $RUN_PATH"
+		fi
+		exit 1
+	fi
+	
+	datetime=`stat -f "%c" $run_path`
+
+	if [ $SILENT -eq 0 ]
+	then
+		echo "+++ adding $run_path"
+	fi
+
+	description=`awk -F '\t' -v run="$RUN_PATH" '{ gsub("\r", "\n"); if ($1 == run) print $2 }' $EXP_PATH/$COND_PATH/$REP_PATH/replicate_info.txt`
+	echo "CALL replicate_run_catalog_add('$EXP_PATH/$COND_PATH/$REP_PATH', '$run_path', '$description', FROM_UNIXTIME($datetime));" | mysql -s msmskit
+else
+	if [ $SILENT -eq 0 ]
+	then
+		echo "*** already found $run_path"
+	fi
+fi

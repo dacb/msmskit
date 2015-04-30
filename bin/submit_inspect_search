@@ -1,0 +1,190 @@
+#!/bin/bash
+#
+# Copyright (C) 2010
+# David A. C. Beck
+# dacb@u.washington.edu
+# Chemical Engineering & eScience Institute
+# University of Washington, Seattle
+#
+# Date: 11/03/2010
+# See version and usage information below
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+PROGNAME=${0##*/}
+PROGVERSION=0.9.2
+
+# setup defaults
+INSPECT_DIR=/gscratch/esci/dacb/inspect
+INSPECT=$INSPECT_DIR/inspect
+INSPECT_PARAMS_TEMPLATE=inspect.params.template
+MSCONVERT=/gscratch/esci/dacb/tpp/bin/msconvert
+JOBS_PER_NODE=8
+
+usage()
+{
+cat << EOF
+
+Usage: $0 [options] <filename of mzXML | mzXML.gz> [ ... ]
+
+This script submits to the queuing system, a InsPecT search of mzXML and mzXML.gz 
+files passed as arguments against the FASTA database defined in a template parameter
+file.  The location of the params file must either be in the current working directory 
+(default) where it is named 'inspect.params.template' or passed as an argument.
+
+Options:
+EOF
+cat << EOF | column -s\& -t
+  -h|--help & Show this message
+  -p|--inspect-params-template <inspect.params.tempate>& Full pathname to the inspect parameter template file
+  -j|--jobs-per-node <#>& Number of jobs per node, defaults to 8
+  -v|--version & Show version information
+  -n|--no-submit & Create job files but do not submit them
+EOF
+}
+
+function makeNodeJobFile {
+cat << EOF > $nodeJobFile
+#!/bin/bash
+
+#PBS -N InsPecT_node$node
+#PBS -d `pwd`
+#PBS -j oe
+#PBS -o $nodeJobLogFile
+#PBS -l walltime=999:99:99,mem=8gb,nodes=1:ppn=8,feature=8core
+#PBS -W group_list=hyak-hackett
+
+
+CORES=\`wc -l < \$PBS_NODEFILE\`
+
+cat $nodeJobListFile | parallel -j \$CORES
+EOF
+}
+
+# parse arguments
+SHORTOPTS="hp:j:vn"
+LONGOPTS="help,inspect-params-template:,jobs-per-node:,version,no-submit"
+ARGS=$(getopt -s bash --options $SHORTOPTS --longoptions $LONGOPTS --name $PROGNAME -- "$@")
+if [ $? != 0 ]; then usage; exit 1; fi
+eval set -- "$ARGS"
+# loop through options
+while true; do
+	case $1 in
+		-h|--help)
+			usage
+			exit 0
+			;;
+		-v|--version)
+			echo "$PROGVERSION"
+			exit 0
+			;;
+		-p|--inspect-params-template)
+			INSPECT_PARAMS_TEMPLATE=$2
+			shift 2
+			;;
+		-j|--jobs-per-node)
+			JOBS_PER_NODE=$2
+			shift 2
+			;;
+		-n|--no-submit)
+			NO_SUBMIT=1
+			shift
+			;;
+		--) 
+			shift
+			break
+			;;
+		*) 
+			shift
+			break
+			;;
+	esac
+done
+
+# prepare variables for job to node distribution with GNU parallel
+jobs=1
+node=1
+nodeJobFile=inspect.node$node.job
+nodeJobLogFile=$nodeJobFile.log
+nodeJobListFile=inspect.node$node.job_list
+rm -rf $nodeJobFile $nodeJobListFile
+makeNodeJobFile
+
+# setup job files
+for mzFile do 
+	mzFilePrefix=`echo $mzFile | sed -e "s/.mzXML.gz//g" -e "s/.mzXML//g"`
+	# version of inspect from around late 2010 could not handle 64 encoding"
+	# these two are identical because of the inspect issue above, when it is resolved, the
+	#   uncompressed handler can set the variables to empty strings
+	if [[ "$mzFile" == *.mzXML ]]; then
+		mzFileDecompress="$MSCONVERT --mzXML --32 --mz32 --inten32 $mzFile"
+		mzFileDecompressRemove="\rm -rf $mzFilePrefix.mzXML"
+	elif [[ "$mzFile" == *.mzXML.gz ]]; then
+		# when the inspect problem w/ 64bit is fixed, the --*32 should be removed below
+		# and the decompress changed to a gunzip
+		mzFileDecompress="$MSCONVERT --mzXML --32 --mz32 --inten32 $mzFile"
+		mzFileDecompressRemove="\rm -rf $mzFilePrefix.mzXML"
+	else
+		echo "error: unexpected file type (not mzXML or mzXML.gz): $mzFile"
+		usage
+		exit 1
+	fi
+
+	inspectParamsFile=$mzFilePrefix.inspect.params
+	inspectOutFile=$mzFilePrefix.out
+
+	jobFile=$mzFilePrefix.job
+	jobLogFile=$jobFile.log
+	jobIdFile=$jobFile.id
+
+	sed "s/SPECTRA_FILE/$mzFilePrefix.mzXML/g" $INSPECT_PARAMS_TEMPLATE > $inspectParamsFile
+
+cat << EOF > $jobFile
+#!/bin/bash
+
+# decompress spectra file
+$mzFileDecompress
+date
+# perform search
+$INSPECT -i $inspectParamsFile -o $inspectOutFile -r $INSPECT_DIR
+date
+$mzFileDecompressRemove
+EOF
+	chmod +x $jobFile
+
+	echo "`pwd`/$jobFile" >> $nodeJobListFile
+#	jobid=`qsub $jobFile`
+#	echo $mzfile $mzFilePrefix $mzFilePrefix.job $jobid
+
+	if [ $jobs -eq $JOBS_PER_NODE ]; then
+		jobid=`qsub $nodeJobFile`
+		echo $nodeJobFile $nodeJobListFile $jobid
+		jobs=0
+		let node+=1
+		nodeJobFile=inspect.node$node.job
+		nodeJobLogFile=$nodeJobFile.log
+		nodeJobListFile=inspect.node$node.job_list
+		rm -rf $nodeJobFile $nodeJobListFile
+		makeNodeJobFile
+	fi
+	let jobs+=1
+done
+
+if [ $jobs -gt 1 ]; then
+	jobid=`qsub $nodeJobFile`
+	echo $nodeJobFile $nodeJobListFile $jobid
+fi
+
+exit 0

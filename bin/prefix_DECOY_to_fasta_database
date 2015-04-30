@@ -1,0 +1,53 @@
+#!/bin/bash
+#
+# Copyright (C) 2010
+# David A. C. Beck
+# dacb@u.washington.edu
+# Chemical Engineering & eScience Institute
+# University of Washington, Seattle
+#
+# Date: 11/03/2010
+# See version and usage information below
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+PROGNAME=${0##*/}
+PROGVERSION=0.9.0
+
+usage()
+{
+cat << EOF
+
+Usage: $0 <filename of input fasta database> 
+
+This script prefixs the locus tag in the fasta database with DECOY. Output to stdout.
+EOF
+}
+
+if [ "$#" -lt 1 ]; then
+	usage
+	exit 1
+fi
+
+inFASTA=$1
+
+if [ ! -r $inFASTA ]; then
+	cat << EOF
+$0: cannot open file $inFASTA for reading, aborting...
+EOF
+	exit 1
+fi
+
+awk '{ if (substr($0, 1, 1) == ">") { locus_tag = $0; sub(">", "", locus_tag); printf(">DECOY_%s\n", locus_tag); }  else print $0 }' $inFASTA

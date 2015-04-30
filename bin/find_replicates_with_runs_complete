@@ -1,0 +1,3 @@
+#!/bin/bash
+
+echo "CALL replicate_with_runs_complete();" | mysql msmskit -s

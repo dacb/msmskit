@@ -1,0 +1,134 @@
+#!/bin/bash
+
+if [ $# -ne 3 ]
+then
+	echo "usage: $0 <silent flag, 0 or 1> <root directory> <replicate directory relative to root>"
+	exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+REP_PATH=$3
+
+FIND_RAW_FILES_IN_REPLICATE=/Users/dacb/msmskit/bin/find_raw_files_in_replicate
+XINTERACT=/usr/local/tpp/bin/xinteract
+PROTEIN_PROPHET=/usr/local/tpp/bin/ProteinProphet
+PROTXML2HTML=/usr/local/tpp/cgi-bin/protxml2html.pl
+SEND_MAIL=/Users/dacb/msmskit/bin/send_mail
+
+PEPPROB=0.6
+
+cd $DATAROOT
+
+#this check should happen but we don't have condition path, must fix
+#in_catalog=`echo "CALL condition_replication_in_catalog('$DATAROOT/COND_PATH', '$DATAROOT/$REP_PATH', @in_catalog); SELECT @in_catalog;" | mysql -s msmskit`
+in_catalog=1
+
+# the replicate file is not in the catalog
+if [ $in_catalog -eq 0 ]
+then
+
+	if [ $SILENT -eq 0 ]
+	then
+		echo replicate $REP_PATH is not in the catalog
+	fi
+
+	exit 1
+else
+	raw_files=`$FIND_RAW_FILES_IN_REPLICATE $REP_PATH | sed "s/RAW/pep.xml/g" | awk -v replicate="$REP_PATH/" '{ sub(replicate, "", $1); printf("%s ", $1); }'`
+# this is now done when the files are downloaded
+#       # fix up paths in pep.xmls
+#       for file in $raw_files
+#       do
+#	       if [ $SILENT -eq 0 ]
+#	       then
+#		       echo fixing up pathes in $file
+#	       fi
+#	       sed -i "" "s/gscratch\/hackett/Volumes\/Drobo1/g" $REP_PATH/$file
+#       done
+	peptide_prophet_job=$REP_PATH/peptide_prophet.job
+	peptide_prophet_log=$REP_PATH/peptide_prophet.log
+	# maybe this should check the database?
+	if [ ! -e $peptide_prophet_job -o ! -e $peptide_prophet_log ]
+	then
+		if [ $SILENT -eq 0 ]
+		then
+			echo creating peptide prophet analysis job $peptide_prophet_job
+		fi
+		cat << EOF > $peptide_prophet_job
+#!/bin/bash
+
+PEPOUT=$DATAROOT/$REP_PATH/interact.pep.xml
+
+$XINTERACT -N\$PEPOUT -p$PEPPROB -l7 -OP -dDECOY $raw_files
+EOF
+		chmod +x $peptide_prophet_job
+		echo "CALL condition_replicate_catalog_set_analysis_running('$REP_PATH');" | mysql -s msmskit
+
+		$SEND_MAIL $REP_PATH "PeptideProphet analysis running for $replicate" << EOF
+PeptideProphet analysis is running for the replicate: $replicate
+
+Job:
+`cat $DATAROOT/$peptide_prophet_job`
+EOF
+
+		cd $REP_PATH
+		./peptide_prophet.job > peptide_prophet.log 2>&1
+		cd $DATAROOT
+		echo "CALL condition_replicate_catalog_peptide_prophet_job('$REP_PATH', '$DATAROOT/$peptide_prophet_job', NOW(), '$DATAROOT/$peptide_prophet_log');" | mysql -s msmskit
+
+		$SEND_MAIL $dir "PeptideProphet analysis completed for $replicate" << EOF
+PeptideProphet is complete for the replicate: $replicate
+
+Log:
+`cat $DATAROOT/$peptide_prophet_log`
+EOF
+
+	fi
+
+	protein_prophet_job=$REP_PATH/protein_prophet.job
+	protein_prophet_log=$REP_PATH/protein_prophet.log
+	if [ ! -e $protein_prophet_job -o ! -e $protein_prophet_log ]
+	then
+		if [ $SILENT -eq 0 ]
+		then
+			echo creating protein prophet analysis job $peptide_prophet_job
+		fi
+		cat << EOF > $protein_prophet_job
+#!/bin/bash
+
+PEPOUT=$DATAROOT/$REP_PATH/interact.pep.xml
+PROTOUT=$DATAROOT/$REP_PATH/interact.prot.xml
+XLSOUT=$DATAROOT/$REP_PATH/interact.prot.xls
+TABOUT=$DATAROOT/$REP_PATH/interact.prot.tab
+
+$PROTEIN_PROPHET \$PEPOUT \$PROTOUT
+$PROTXML2HTML -file \$PROTOUT HTML
+$PROTXML2HTML -file \$PROTOUT EXCEL
+mv \$XLSOUT \$TABOUT
+EOF
+		chmod +x $protein_prophet_job
+		cd $REP_PATH
+
+		$SEND_MAIL $dir "ProteinProphet analysis running for $replicate" << EOF
+ProteinProphet analysis is running for the replicate: $replicate
+
+Job:
+`$DATAROOT/$protein_prophet_job`
+EOF
+
+		./protein_prophet.job > protein_prophet.log 2>&1
+		cd $DATAROOT
+		echo "CALL condition_replicate_catalog_protein_prophet_job('$REP_PATH', '$DATAROOT/$protein_prophet_job', NOW(), '$DATAROOT/$protein_prophet_log');" | mysql -s msmskit
+
+		$SEND_MAIL $dir "ProteinProphet analysis completed for $replicate" << EOF
+ProteinProphet is complete for the replicate: $replicate
+
+Log:
+`cat $DATAROOT/$protein_prophet_log`
+EOF
+
+	fi
+
+fi
+

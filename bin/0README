@@ -1,0 +1,24 @@
+#!/bin/bash
+
+DIRS="Erik dacb"
+
+i=0
+
+while true
+do
+	i=$(($i + 1))
+	echo round $i is commencing
+
+	for dir in $DIRS
+	do
+		echo examining $dir for new RAW files
+		catalog_RAW_files -d $dir
+		catalog_experiments -d $dir
+		upload_for_analysis -v
+		poll_for_analysis -v
+		analyze_replicates -d $dir
+		join_replicates_for_conditions -d $dir
+		compare_conditions_for_experiments -d $dir
+	done
+	sleep 3600
+done

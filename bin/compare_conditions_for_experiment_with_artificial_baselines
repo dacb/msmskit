@@ -1,0 +1,354 @@
+#!/bin/bash
+
+NUM_UNIQUE_PEP_CUTOFF=3
+MIN_PROTEIN_PROB_CUTOFF=.9
+
+if [ $# -ne 5 -a $# -ne 6 ]
+then
+	echo "usage: $0 <silent flag, 0 or 1> <root directory> <experiment path> <condition_i path> <condition_j path> [<locus restriction>]"
+	exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+EXP_PATH=$3
+CONDi_PATH=$4
+CONDj_PATH=$5
+
+if [ $# -eq 6 ]
+then
+	LOCUS_RESTRICTION=$6
+	postfix=".$LOCUS_RESTRICTION"
+	where="WHERE proteins.protein LIKE '$LOCUS_RESTRICTION%' AND "
+else
+	postfix=""
+	where="WHERE "
+fi
+
+cd $DATAROOT
+
+if [ $SILENT -eq 0 ]
+then
+	echo "experiment $EXP_PATH : $CONDi_PATH vs $CONDj_PATH - $LOCUS_RESTRICTION"
+fi
+
+ci=`basename $CONDi_PATH`
+cj=`basename $CONDj_PATH`
+prefix=$EXP_PATH/${cj}_vs_${ci}$postfix/with_artificial_baselines
+
+# create sub directory for comparisons
+mkdir -p $prefix
+
+# list of files created by this analysis
+sqlfile=$prefix/join_and_extract.sql
+sqllogfile=$prefix/join_and_extract.sql.log
+datfile=$prefix/extract.dat
+Rfile=$prefix/statistics.R
+Rlogfile=$prefix/statistics.R.log
+tabfile=$prefix/results.tab
+pdffile=$prefix/results.pdf
+
+if [ -f $sqlfile -a -f $sqllogfile -a -f $datfile -a -f $Rfile -a -f $Rlogfile -a -f $tabfile ]
+then
+	if [ $SILENT -eq 0 ]
+	then
+		echo "$CONDj_PATH vs $CONDi_PATH looks complete, skipping"
+	fi
+	exit
+fi
+
+if [ $SILENT -eq 0 ]
+then
+	echo "$CONDj_PATH vs $CONDi_PATH (restrictions: $LOCUS_RESTRICTION) with artificial baselines will be run now"
+fi
+
+# first join the two datasets on protein
+# to do this, we need to create SQL input which generates an R compatible output
+header=""
+cat << EOF > $sqlfile
+# $prefix
+
+EOF
+# for condition i and j, generate a temporary table from the joined replicates
+for cond in $CONDj_PATH $CONDi_PATH
+do
+	table=`basename $cond`
+cat << EOF >> $sqlfile
+# $cond
+CREATE TEMPORARY TABLE $table (
+	protein	VARCHAR(64) PRIMARY KEY NOT NULL
+EOF
+	replicates=`echo "CALL replicates_in_condition('$cond');" | mysql -s msmskit`
+	for replicate in $replicates
+	do
+		r=`basename $replicate`
+		header="$header, '${table}_${r}_protein_probability', '${table}_${r}_percent_coverage', '${table}_${r}_num_unique_peps', '${table}_${r}_tot_indep_spectra'"
+cat << EOF >> $sqlfile
+	, ${r}_protein_probability	FLOAT
+	, ${r}_percent_coverage		FLOAT
+	, ${r}_num_unique_peps		INTEGER
+	, ${r}_tot_indep_spectra	INTEGER
+EOF
+	done
+cat << EOF >> $sqlfile
+);
+LOAD DATA INFILE '$DATAROOT/$cond/replicates.tab'
+        INTO TABLE $table FIELDS TERMINATED BY '\t' LINES TERMINATED BY '\n'
+	IGNORE 1 LINES
+;
+
+EOF
+done
+# now join, but first we need to unique list proteins
+cat << EOF >> $sqlfile
+# create another temporary table with all the DISTINCT proteins observed in all conditions
+CREATE TEMPORARY TABLE proteins (
+        protein VARCHAR(64) PRIMARY KEY NOT NULL
+) SELECT DISTINCT protein FROM (
+EOF
+c=1
+        		# list each condition table
+        		for cond in $CONDj_PATH $CONDi_PATH
+        		do
+	table=`basename $cond`
+                		if [ $c -ne 1 ]
+                		then
+cat << EOF >> $sqlfile
+        UNION
+EOF
+                		fi
+cat << EOF >> $sqlfile
+                SELECT DISTINCT protein FROM $table
+EOF
+	c=$(($c + 1))
+done
+cat << EOF >> $sqlfile
+) AS all_proteins;
+
+# output header for dat file
+SELECT 'protein' $header, 'artificial baselines';
+
+# now do the join
+SELECT proteins.protein
+EOF
+for cond in $CONDj_PATH $CONDi_PATH
+do
+	table=`basename $cond`
+cat << EOF >> $sqlfile
+	# $table
+EOF
+	replicates=`echo "CALL replicates_in_condition('$cond');" | mysql -s msmskit`
+	for replicate in $replicates
+	do
+		r=`basename $replicate`
+cat << EOF >> $sqlfile
+	, IF(ISNULL($table.${r}_protein_probability), 0, $table.${r}_protein_probability) AS ${table}_${r}_protein_probability
+	, IF(ISNULL($table.${r}_percent_coverage), 0, $table.${r}_percent_coverage) AS ${table}_${r}_percent_coverage
+	, IF(ISNULL($table.${r}_num_unique_peps), 0, $table.${r}_num_unique_peps) AS ${table}_${r}_num_unique_peps
+	, IF(IF(ISNULL($table.${r}_num_unique_peps), 0, $table.${r}_num_unique_peps) >= $NUM_UNIQUE_PEP_CUTOFF, $table.${r}_tot_indep_spectra, IF(ISNULL($table.${r}_protein_probability), 1, IF($table.${r}_protein_probability >= $MIN_PROTEIN_PROB_CUTOFF, $table.${r}_tot_indep_spectra, 1))) AS ${table}_${r}_tot_indep_spectra
+EOF
+	#, IF(ISNULL($table.${r}_tot_indep_spectra), 0, $table.${r}_tot_indep_spectra) AS ${table}_${r}_tot_indep_spectra
+	done
+done
+
+# include a field to indicate if this locus tag was artificially baselined
+printf "\t, CONCAT_WS(' ' " >> $sqlfile
+for cond in $CONDj_PATH $CONDi_PATH
+do
+        table=`basename $cond`
+	replicates=`echo "CALL replicates_in_condition('$cond');" | mysql -s msmskit`
+	for replicate in $replicates
+	do
+		r=`basename $replicate`
+		printf ", IF(IF(ISNULL(%s), 0, %s) >= %s, '', '%s')" "$table.${r}_num_unique_peps" "$table.${r}_num_unique_peps" "$NUM_UNIQUE_PEP_CUTOFF" "${table}_${r}"  >> $sqlfile
+	done
+done
+printf ") AS artificial_baselines\n" >> $sqlfile
+
+cat << EOF >> $sqlfile
+	FROM proteins
+EOF
+for cond in $CONDj_PATH $CONDi_PATH
+do
+	table=`basename $cond`
+cat << EOF >> $sqlfile
+		LEFT JOIN $table ON proteins.protein = $table.protein
+EOF
+done
+
+# only include proteins that were detected at the number of unique peptide cutoff in at least one replicate across
+num_unique_peps_restriction="( 0 "
+for cond in $CONDj_PATH $CONDi_PATH
+do
+	table=`basename $cond`
+	replicates=`echo "CALL replicates_in_condition('$cond');" | mysql -s msmskit`
+	for replicate in $replicates
+	do
+		r=`basename $replicate`
+		num_unique_peps_restriction="$num_unique_peps_restriction OR IF(ISNULL($table.${r}_num_unique_peps), 0, $table.${r}_num_unique_peps) >= $NUM_UNIQUE_PEP_CUTOFF"
+	done
+done
+num_unique_peps_restriction="$num_unique_peps_restriction )"
+
+cat << EOF >> $sqlfile
+	$where $num_unique_peps_restriction
+	ORDER BY proteins.protein
+;
+EOF
+mysql -s msmskit < $sqlfile > $datfile 2> $sqllogfile
+
+# now, run R which reads in the previous output and generates a new excel output
+# to make things easier, let's first collect the names of the spectral count columns into
+# two arrays, cols_i for CONDi_PATH and cols_j for CONDj_PATH
+# ci and cj are defined before
+cols_i=""
+replicates_i=`echo "CALL replicates_in_condition('$CONDi_PATH');" | mysql -s msmskit`
+for replicate in $replicates_i
+do
+	r=`basename $replicate`
+	cols_i="$cols_i ${ci}_${r}_tot_indep_spectra"
+done
+cols_j=""
+replicates_j=`echo "CALL replicates_in_condition('$CONDj_PATH');" | mysql -s msmskit`
+for replicate in $replicates_j
+do
+	r=`basename $replicate`
+	cols_j="$cols_j ${cj}_${r}_tot_indep_spectra"
+done
+cat << EOF > $Rfile
+library(fdrtool)
+
+# read the data table into d
+d <- read.table('$datfile', sep='\t', header=T);
+
+# normalize by the max sum of spectral counts (the 0 is to make it easier to use commas when generating the next sum commands, ignore it)
+sc.sum.max <- max ( 0
+EOF
+for col in $cols_i $cols_j
+do
+cat << EOF >> $Rfile
+		, sum(d\$$col)
+EOF
+done
+cat << EOF >> $Rfile
+	)
+EOF
+for col in $cols_i $cols_j
+do
+cat << EOF >> $Rfile
+d\$${col}_norm <- d\$$col*(sc.sum.max/sum(d\$$col))
+EOF
+done
+cat << EOF >> $Rfile
+
+# do t-tests using M. Hackett's method of pairing each replicate against each other
+tt <- c()
+tvalue <- c()
+t.df <- c()
+pvalue <- c()
+for (i in 1:length(d\$protein))
+{
+EOF
+out=""
+for col in $cols_i
+do
+	for x in $cols_j
+	do
+		if [ -n "$out" ]
+		then
+out="$out,"
+		fi
+		out="$out d\$${col}_norm[i]"
+	done
+done
+cat << EOF >> $Rfile
+	$ci <- c( $out )
+	# use QX artifical baseline if sd = 0
+	if (sd($ci)==0) $ci[1]=$ci[1]+1;
+EOF
+out=""
+for x in $cols_i
+do
+	for col in $cols_j
+	do
+		if [ -n "$out" ]
+		then
+out="$out,"
+		fi
+		out="$out d\$${col}_norm[i]"
+	done
+done
+cat << EOF >> $Rfile
+	$cj <- c( $out )
+	if (sd($cj)==0) $cj[1]=$cj[1]+1;
+	tt <- t.test( $ci, $cj )
+	t.df[i] <- tt\$parameter
+	tvalue[i] <- tt\$statistic
+	pvalue[i] <- tt\$p.value
+}
+
+# M. Hackett's z-transform
+z <- (tvalue-mean(tvalue))/sd(tvalue)
+
+# calculate qvalues and local false discovery rate
+fdrt <- fdrtool(pvalue, statistic="pvalue")
+
+# ratio and product
+${ci}_mean <- ( 0
+EOF
+count=0
+for col in $cols_i
+do
+cat << EOF >> $Rfile
+		+ d\$${col}_norm
+EOF
+	count=$(($count + 1))
+done
+cat << EOF >> $Rfile
+	) / $count;
+${cj}_mean <- ( 0
+EOF
+count=0
+for col in $cols_j
+do
+cat << EOF >> $Rfile
+		+ d\$${col}_norm
+EOF
+	count=$(($count + 1))
+done
+cat << EOF >> $Rfile
+	) / $count
+ratio <- log( ${ci}_mean / ${cj}_mean, 2)
+product <- log( ${ci}_mean * ${cj}_mean , 2)
+
+# write Excel compatible table
+write.table(data.frame(d, ratio, product, tvalue, pvalue, z, fdrt\$qval, fdrt\$lfdr),
+	file='$tabfile', append=F, quote=F, row.names=F, sep='\t')
+
+# open PDF for output of figures
+pdf("$pdffile")
+plot(product, ratio, main="M/A");
+hist(ratio, main="Histogram of ratios", n=35);
+hist(pvalue, main="Histogram of pvalues");
+hist(fdrt\$qval, main="Histogram of qvalues");
+hist(fdrt\$lfdr, main="Histogram of local false discovery rate");
+plot(pvalue, fdrt\$qval, main="pvalues vs qvalues", xlab="pvalue", ylab="qvalues");
+plot(pvalue, fdrt\$lfdr, main="pvalues vs local false discovery rate", xlab="pvalue", ylab="lfdr");
+dev.off();
+
+print("all done!")
+EOF
+#$SEND_MAIL $experiment "comparing $CONDj_PATH vs $CONDi_PATH for $experiment" << EOF
+#Comparing the conditions $CONDj_PATH vs $CONDi_PATH for experiment: $experiment
+#
+#Job:
+#`cat $Rfile`
+#EOF
+R --no-save < $Rfile > $Rlogfile 2>&1
+#$SEND_MAIL $experiment "comparison $CONDj_PATH vs $CONDi_PATH for $experiment complete" << EOF
+#The comparisons of the conditions $CONDj_PATH vs $CONDi_PATH for experiment: $experiment have been completed.
+#
+#Log:
+#`cat $Rlogfile`
+#EOF
+

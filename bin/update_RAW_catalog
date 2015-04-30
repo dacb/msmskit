@@ -1,0 +1,9 @@
+#!/bin/bash
+
+CATALOG_RAW_FILES=/Users/dacb/msmskit/bin/catalog_raw_files
+DIRS="Erik Tony"
+
+for dir in $DIRS
+do
+	$CATALOG_RAW_FILES --dir $dir
+done

@@ -1,0 +1,129 @@
+#!/bin/bash
+
+SEND_MAIL=/Users/dacb/msmskit/bin/send_mail
+
+if [ $# -gt 1 ]
+then
+	echo "usage: $0 [-v, verbose flag, default is silent]"
+	exit 1
+fi
+
+# setup defaults and statics
+SILENT=$#
+DATAROOT=/Volumes/Drobo1
+SOCKET=/tmp/dacb-hyak-socket
+REMOTE_DATAROOT=/gscratch/hackett
+CATALOG_FILE_ANALYSIS=/Users/dacb/msmskit/bin/catalog_RAW_file_analysis
+CATALOG_FILE_ANALYSIS_QUEUED=/Users/dacb/msmskit/bin/catalog_RAW_file_analysis_queued
+CATALOG_FILE_ANALYSIS_RUNNING=/Users/dacb/msmskit/bin/catalog_RAW_file_analysis_running
+
+cd $DATAROOT
+
+if [ ! -r $SOCKET ]
+then
+	echo the socket file $SOCKET does not exist or is not readable
+	exit 1
+fi
+
+FILES="`echo "CALL RAW_catalog_unanalyzed();" | mysql -s msmskit` `echo "CALL RAW_catalog_analysis_queued();" | mysql -s msmskit` `echo "CALL RAW_catalog_analysis_running();" | mysql -s msmskit`"
+
+for file in $FILES
+do
+	if [ $SILENT -ne 0 ]
+	then
+		echo $file
+	fi
+
+	dirname=`dirname $file`
+	filename=`echo $file | awk -F'/' '{ print $NF }'`
+
+        job=`echo $filename | sed "s/RAW/job/g"`
+        joblog=$job.log
+        pepXML=`echo $filename | sed "s/RAW/pep.xml/g"`
+	outtgz=`echo $filename | sed "s/RAW/tgz/g"`
+
+	# look for the job file
+	job_exists=`ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; find $dirname -name '$job')"`
+	if [ -n "$job_exists" ]
+	then
+		# look for hour old job log
+		joblog_exists=`ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; find $dirname -name '$joblog' -cmin +60)"`
+		if [ -n "$joblog_exists" ]
+		then
+			# look for hour old pep xml
+			pepXML_exists=`ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; find $dirname -name '$pepXML' -cmin +60)"`
+			if [ -n "$pepXML_exists" ]
+			then
+				# pepXML exists so download everything
+				if [ $SILENT -ne 0 ]
+				then
+					echo analysis complete for file $file
+					ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; tar -cf - $dirname/$pepXML $dirname/$job $dirname/$joblog $dirname/$outtgz)" | tar -xvf -
+				else
+					ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; tar -cf - $dirname/$pepXML $dirname/$job $dirname/$joblog)" | tar -xf -
+				fi
+				chmod oug+r $dirname/$pepXML $dirname/$job $dirname/$joblog
+				if [ $SILENT -ne 0 ]
+				then
+					echo fixing up pathes in $dirname/$pepXML
+				fi
+				sed -i "" "s/gscratch\/hackett/Volumes\/Drobo1/g" $dirname/$pepXML
+
+			        $SEND_MAIL $file "analysis finished for $file" << EOF
+SEQUEST search has completed on Hyak for the file: $file
+
+Log:
+`$dirname/$joblog`
+EOF
+
+			else
+				if [ $SILENT -ne 0 ]
+				then
+					echo analysis may have failed for $file
+					ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; tar -cf - $dirname/$job $dirname/$joblog)" | tar -xvf -
+				else
+					ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; tar -cf - $dirname/$job $dirname/$joblog)" | tar -xf -
+				fi
+				chmod oug+r $dirname/$job $dirname/$joblog
+
+			        $SEND_MAIL $file "analysis failed for $file" << EOF
+SEQUEST search has failed on Hyak for the file: $file
+
+Log:
+`$dirname/$joblog`
+EOF
+			fi
+			$CATALOG_FILE_ANALYSIS $SILENT $DATAROOT $file
+		else
+			# no job log, analysis is queued or running
+			# look for a logfile (without 1 hour old requirement)
+			joblog_exists=`ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; find $dirname -name '$joblog')"`
+			if [ -n "$joblog_exists" ]
+			then
+				# job log exists but is less than an hour old, consider the job running
+				if [ $SILENT -ne 0 ]
+				then
+					echo analysis is running for file $file
+				fi
+				$CATALOG_FILE_ANALYSIS_RUNNING $SILENT $DATAROOT $file
+
+#			        $SEND_MAIL $file "analysis running for $file" << EOF
+#SEQUEST search is running on Hyak for the file: $file
+#EOF
+			else
+				# no job log whatsoever - this is only queued
+				if [ $SILENT -ne 0 ]
+				then
+					echo analysis is queued for file $file
+				fi
+				$CATALOG_FILE_ANALYSIS_QUEUED $SILENT $DATAROOT $file
+			fi
+		fi
+	else
+		# no job file exists
+		if [ $SILENT -ne 0 ]
+		then
+			echo no analysis available for $file
+		fi
+	fi
+done

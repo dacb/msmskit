@@ -1,0 +1,21 @@
+#!/bin/bash
+
+if [ $# -ne 2 ]
+then
+	echo "usage: $0 <root directory> <experiment path relative to root directory>"
+	echo "e.g. $0 /Volumes/Drobo1 dacb/PgSgFn_Community"
+	exit 1
+fi
+
+DATAROOT=$1
+EXP_PATH=$2
+
+if [ ! -d $DATAROOT/$EXP_PATH ]
+then
+	echo "$0: not a directory '$DATAROOT/$EXP_PATH'"
+	exit 1
+fi
+
+echo "$0: calling experiment_delete stored procedure on '$EXP_PATH'"
+echo "CALL experiment_delete('$EXP_PATH');" | mysql msmskit
+echo "done."

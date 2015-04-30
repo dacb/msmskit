@@ -1,0 +1,3 @@
+#!/bin/bash
+
+echo "CALL experiments_with_complete_conditions();" | mysql msmskit -s

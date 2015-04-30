@@ -1,0 +1,43 @@
+#!/bin/bash
+
+CATALOG_CONDITION=/Users/dacb/msmskit/bin/catalog_condition
+
+if [ $# -ne 3 ]
+then
+        echo "usage: $0 <silent flag, 0 or 1> <root directory> <experiment_info.txt path relative to root>"
+        exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+EXPINFOFILE=$3
+
+exp_path=`dirname $EXPINFOFILE`
+
+in_catalog=`echo "CALL experiment_in_catalog('$exp_path', @in_catalog); SELECT @in_catalog;" | mysql -s msmskit`
+
+# the experiment is not in the catalog, let's add it
+if [ $in_catalog -eq 0 ]
+then
+	datetime=`stat -f "%c" $exp_path`
+
+	if [ $SILENT -eq 0 ]
+	then
+		echo ""
+		echo "adding $exp_path -------------------------------------------"
+	fi
+
+	echo "CALL experiment_catalog_add('$exp_path', FROM_UNIXTIME($datetime));" | mysql -s msmskit
+
+	conditions=`awk -F'\t' '{ if (substr($0, 1, 1) != "#") print $1 }' $EXPINFOFILE`
+
+	for cond in $conditions
+	do
+		$CATALOG_CONDITION $SILENT $DATAROOT $exp_path $cond
+	done
+else
+	if [ $SILENT -eq 0 ]
+	then
+		echo "* already found $exp_path"
+	fi
+fi

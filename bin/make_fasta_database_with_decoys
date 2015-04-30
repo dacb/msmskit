@@ -1,0 +1,73 @@
+#!/bin/bash
+#
+# Copyright (C) 2010
+# David A. C. Beck
+# dacb@u.washington.edu
+# Chemical Engineering & eScience Institute
+# University of Washington, Seattle
+#
+# Date: 11/03/2010
+# See version and usage information below
+#
+# This library is free software; you can redistribute it and/or
+# modify it under the terms of the GNU Lesser General Public
+# License as published by the Free Software Foundation; either
+# version 2.1 of the License, or (at your option) any later version.
+#
+# This library is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the GNU
+# Lesser General Public License for more details.
+#
+# You should have received a copy of the GNU Lesser General Public
+# License along with this library; if not, write to the Free Software
+# Foundation, Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301  USA
+
+PROGNAME=${0##*/}
+PROGVERSION=0.9.0
+
+usage()
+{
+cat << EOF
+
+Usage: $0 <filename of output fasta database> <filename of root fasta database> [ <filename of additional fasta databases to include> ... ]
+
+This script creates a new fasta database from a root fasta database.  It appends the
+reverse sequences in the root fasta database (with accession numbers prepended with
+the word DECOY).  It will also append an arbitrary number of additional fasta files
+to the final database with DECOY prepended to the accession.
+EOF
+}
+
+if [ "$#" -lt 2 ]; then
+	usage
+	exit 1
+fi
+
+outFASTA=$1
+rootFASTA=$2
+
+if [ ! -r $rootFASTA ]; then
+	cat << EOF
+$0: cannot open file $rootFASTA for reading, aborting...
+EOF
+	exit 1
+fi
+
+cat < $rootFASTA > $outFASTA 
+awk '{ if (substr($0, 1, 1) == ">") { if (locus_tag != "") { printf(">DECOY_%s\n%s\n", locus_tag, wrap(reverse(sequence), 80)); } locus_tag = $0; sub(">", "", locus_tag); sequence = ""; } else { sequence = sequence $0; } } END { if (locus_tag != "") { printf(">DECOY_%s\n%s\n", locus_tag, wrap(reverse(sequence), 80)); } } function reverse(s) { r = ""; for(i=length(s); i > 0; i--) { r = r substr(s, i, 1); } return r; } function wrap(text, lw) { r = ""; ll=int(length(text)/lw) ; i=1 ;  if (length(text)>lw) {  { r = substr(text,0,lw) }  while (i<=ll) { { r = r "\n" substr(text,i*lw+1,lw) } i=i+1}  } else {  { r = (text) } } return r; }' $rootFASTA >> $outFASTA
+
+eval set -- "$@"
+shift
+shift
+
+for FASTA in "$@"
+do
+	if [ ! -r $FASTA ]; then
+		cat << EOF
+$0: cannot open file $FASTA for reading, aborting...
+EOF
+		exit 1
+	fi
+	cat $FASTA >> $outFASTA
+done

@@ -1,0 +1,3 @@
+#!/bin/bash
+
+echo "CALL conditions_with_analyzed_replicates();" | mysql msmskit -s

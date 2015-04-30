@@ -1,0 +1,10 @@
+#!/bin/bash
+
+# setup defaults and statics
+DATAROOT=/Volumes/Drobo1
+SOCKET=/tmp/dacb-hyak-socket
+REMOTE_DATAROOT=/gscratch/hackett
+
+cd $DATAROOT
+
+tar -czf - data | ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; tar -xvzf - )"

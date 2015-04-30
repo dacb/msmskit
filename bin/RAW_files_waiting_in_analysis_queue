@@ -1,0 +1,3 @@
+#!/bin/bash
+
+echo "CALL RAW_catalog_analysis_queued();" | mysql -s msmskit

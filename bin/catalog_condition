@@ -1,0 +1,83 @@
+#!/bin/bash
+
+CATALOG_REPLICATE=/Users/dacb/msmskit/bin/catalog_replicate
+
+if [ $# -ne 4 ]
+then
+        echo "usage: $0 <silent flag, 0 or 1> <root directory> <experiment path> <condition path relative to experiment path>"
+        exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+EXP_PATH=$3
+COND_PATH=$4
+
+in_catalog=`echo "CALL experiment_condition_in_catalog('$EXP_PATH', '$EXP_PATH/$COND_PATH', @in_catalog); SELECT @in_catalog;" | mysql -s msmskit`
+
+cd $DATAROOT
+
+condition_path=$EXP_PATH/$COND_PATH
+
+# the condition is not in the catalog, let's add it
+if [ $in_catalog -eq 0 ]
+then
+
+	if [ ! -d $condition_path ]
+	then
+		if [ $SILENT -eq 0 ]
+		then
+			echo "! experiment $EXP_PATH does not have a directory for $COND_PATH"
+		fi
+		exit 1
+	fi
+
+	datetime=`stat -f "%c" $condition_path`
+
+	if [ $SILENT -eq 0 ]
+	then
+		echo "+ adding $condition_path"
+	fi
+
+	description=`awk -F '\t' -v condition="$COND_PATH" '{ gsub("\r", "\n"); if ($1 == condition) print $2 }' $EXP_PATH/experiment_info.txt`
+	locus_restriction_prefixes=`awk -F '\t' -v condition="$COND_PATH" '{ gsub("\r", "\n"); if ($1 == condition) print $3 }' $EXP_PATH/experiment_info.txt | sed "s/,/ /g"`
+	echo "CALL experiment_condition_catalog_add('$EXP_PATH', '$condition_path', '$description', FROM_UNIXTIME($datetime));" | mysql -s msmskit
+	for prefix in $locus_restriction_prefixes
+	do
+		echo "CALL experiment_condition_locus_restriction_add('$condition_path', '$prefix');" | mysql -s msmskit
+	done
+
+	cond_info=$condition_path/condition_info.txt
+
+	if [ -r $cond_info ]
+	then
+		replicates=`awk '{ gsub("\r", "\n");  if (substr($0, 1, 1) != "#") print $1 }' $cond_info`
+		for rep in $replicates
+		do
+			$CATALOG_REPLICATE $SILENT $DATAROOT $EXP_PATH $COND_PATH $rep
+		done
+	else
+		if [ $SILENT -eq 0 ]
+		then
+			echo "! for experiment $EXP_PATH the condition $COND_PATH does not have a condition_info.txt file present"
+		fi
+	fi
+
+else
+	if [ $SILENT -eq 0 ]
+	then
+		echo "* already found $condition_path"
+	fi
+fi
+
+sqlfile=$condition_path/join_replicates.sql
+tabfile=$condition_path/replicates.tab
+logfile=$condition_path/join_replicates.log
+if [ -e $sqlfile -a -e $tabfile -a -e $logfile ]
+then
+	if [ $SILENT -eq 0 ]
+	then
+		echo "* adding experiment condition job info for $condition_path"
+	fi
+	echo "CALL experiment_condition_catalog_job('$condition_path', '$DATAROOT/$sqlfile', NOW(), '$DATAROOT/$logfile');" | mysql -s msmskit
+fi

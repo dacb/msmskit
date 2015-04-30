@@ -1,0 +1,60 @@
+#!/bin/bash
+
+DATAROOT=/cygdrive/e
+HOST_DATAROOT=/Volumes/Drobo1
+MYSQL=/cygdrive/c/Program\ Files/MySQL/MySQL\ Workbench\ Community\ Edition\ 5.2.34/mysql
+
+i=0
+
+cd $DATAROOT
+
+while true
+do
+	i=$(($i + 1))
+        echo round $i is commencing
+
+	files=`echo "CALL RAW_catalog_unconverted();" | "$MYSQL" -u dacb -h 128.208.236.38 -s msmskit | awk '{ print $1 }'`
+
+	for file in $files
+	do
+		dir=`dirname $file`
+		filename=`echo $file | awk -F'/' '{ print $NF }'`
+		mzXML=`echo $filename | sed "s/.RAW/.mzXML.gz/g"`
+	
+		cd $dir
+		if [ ! -e $mzXML ]
+		then
+			echo $dir $filename $mzXML
+			ssh dacb@128.208.236.38 "/Users/dacb/msmskit/bin/send_mail $dir 'msconvert running for file $file'" << EOF
+The conversion of RAW file to mzXML.gz is running for file $file.
+EOF
+			msconvert $filename --mzXML --gzip >& $filename.msconvert.log
+			echo adding msconvert log $msconvertlog
+			datetime=`date +%s`
+			echo "CALL RAW_catalog_msconvert('$file', FROM_UNIXTIME($datetime), '$HOST_DATAROOT/$msconvertlog');" | "$MYSQL" -u dacb -h 128.208.236.38 -s msmskit
+			if [ ! -e $mzXML ]
+			then
+				echo "conversion failed!"
+				echo "CALL RAW_catalog_set_conversion_failed('$file');" | "$MYSQL" -u dacb -h 128.208.236.38 -s msmskit
+				
+				ssh dacb@128.208.236.38 "/Users/dacb/msmskit/bin/send_mail $dir 'msconvert failed for file $file'" << EOF
+The conversion of RAW file to mzXML.gz failed for file $file.
+
+Log:
+`cat $filename.msconvert.log`
+EOF
+			else
+				ssh dacb@128.208.236.38 "/Users/dacb/msmskit/bin/send_mail $dir 'msconvert finished for file $file'" << EOF
+The conversion of RAW file to mzXML.gz is finished for file $file.
+
+Log:
+`cat $filename.msconvert.log`
+EOF
+			fi
+		fi
+
+		cd $DATAROOT	
+	done
+
+	sleep 3600
+done

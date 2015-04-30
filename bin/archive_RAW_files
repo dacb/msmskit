@@ -1,0 +1,49 @@
+#!/bin/bash
+
+if [ $# -gt 1 ]
+then
+	echo "usage: $0 [-v, verbose flag, default is silent]"
+	exit 1
+fi
+
+# setup defaults and statics
+SILENT=$#
+DATAROOT=/Volumes/Drobo1
+SOCKET=/tmp/dacb-hyak-socket
+REMOTE_DATAROOT=/lolo/archive/hyak/hackett
+
+cd $DATAROOT
+
+if [ ! -r $SOCKET ]
+then
+	echo the socket file $SOCKET does not exist or is not readable
+	exit 1
+fi
+
+FILES="`echo "CALL RAW_catalog_unarchived();" | mysql -s msmskit`"
+
+for file in $FILES
+do
+	if [ $SILENT -ne 0 ]
+	then
+		echo $file
+	fi
+
+	dirname=`dirname $file`
+	filename=`echo $file | awk -F'/' '{ print $NF }'`
+
+	# upload the mzXML.gz and run submit
+	tar -cLf - $dirname/$filename | ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; tar -xvf - --exclude='._*')"
+
+	# create md5 sum remotely and compare to local
+	md5sum_remote=`ssh -S $SOCKET $USER@hyak "(cd $REMOTE_DATAROOT; md5sum $dirname/$filename)" | awk '{ print $1 }'`
+	md5sum_local=`awk '{ print $1 }' $dirname/$filename.md5`
+
+	if [ "$md5sum_remote" == "$md5sum_local" ]
+	then
+		echo "CALL RAW_catalog_archived('$file');" | mysql -s msmskit
+	elif [ $SILENT -ne 0 ]
+	then
+		echo "backup failed for file $file : md5 sum mismatch!"
+	fi
+done

@@ -1,0 +1,28 @@
+#!/bin/bash
+
+if [ $# -ne 3 ]
+then
+	echo "usage: $0 <silent flag, 0 or 1> <root directory> <RAW file relative to root>"
+	exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+RAWFILE=$3
+
+in_catalog=`echo "CALL RAW_in_catalog('$RAWFILE', @in_catalog); SELECT @in_catalog;" | mysql -s msmskit`
+
+# the RAW file is not in the catalog
+if [ $in_catalog -eq 0 ]
+then
+
+	if [ $SILENT -eq 0 ]
+	then
+		echo raw file $RAWFILE is not in the catalog
+	fi
+
+	exit 1
+else
+	echo "CALL RAW_catalog_set_analysis_queued('$RAWFILE');" | mysql -s msmskit
+fi
+

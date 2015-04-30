@@ -1,0 +1,9 @@
+#!/bin/bash
+
+if [ $# -ne 1 ]
+then
+	echo "usage: $0 <path of replicate relative to /Volumes/Drobo1>"
+	exit
+fi
+
+echo "CALL replicate_raw_files('$1');" | mysql msmskit -s

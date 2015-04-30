@@ -1,0 +1,125 @@
+#!/bin/bash
+
+CATALOG_RUN=/Users/dacb/msmskit/bin/catalog_run
+
+if [ $# -ne 5 ]
+then
+        echo "usage: $0 <silent flag, 0 or 1> <root directory> <experiment path> <condition path relative to experiment path> <replicate path relative to condition path>"
+        exit 1
+fi
+
+SILENT=$1
+DATAROOT=$2
+EXP_PATH=$3
+COND_PATH=$4
+REP_PATH=$5
+
+in_catalog=`echo "CALL condition_replicate_in_catalog('$EXP_PATH/$COND_PATH', '$EXP_PATH/$COND_PATH/$REP_PATH', @in_catalog); SELECT @in_catalog;" | mysql -s msmskit`
+
+# the replicate is not in the catalog, let's add it
+if [ $in_catalog -eq 0 ]
+then
+	replicate_path=$EXP_PATH/$COND_PATH/$REP_PATH
+
+	if [ ! -d $replicate_path ]
+	then
+		if [ $SILENT -eq 0 ]
+		then
+			echo "! experiment $EXP_PATH condition $COND_PATH does not have a directory for $REP_PATH"
+		fi
+		exit 1
+	fi
+	
+	datetime=`stat -f "%c" $replicate_path`
+
+	if [ $SILENT -eq 0 ]
+	then
+		echo "++ adding $replicate_path"
+	fi
+
+	description=`awk -F '\t' -v replicate="$REP_PATH" '{ gsub("\r", "\n"); if ($1 == replicate) print $2 }' $EXP_PATH/$COND_PATH/condition_info.txt`
+	echo "CALL condition_replicate_catalog_add('$EXP_PATH/$COND_PATH', '$replicate_path', '$description', FROM_UNIXTIME($datetime));" | mysql -s msmskit
+
+	rep_info=$replicate_path/replicate_info.txt
+
+	if [ -r $rep_info ]
+	then
+		runs=`awk '{ gsub("\r", "\n"); if (substr($0, 1, 1) != "#") print $1 }' $rep_info`
+		for run in $runs
+		do
+			$CATALOG_RUN $SILENT $DATAROOT $EXP_PATH $COND_PATH $REP_PATH $run
+		done
+
+		now=`date`
+		now=`date -j -f "%a %b %d %T %Z %Y" "$now" "+%s"`
+
+		if [ $SILENT -eq 0 ]
+		then
+			echo "** looking for peptide and protein prophet bundle for $REP_PATH"
+		fi
+		# look for the peptide prophet job file
+		peptide_prophet_job=$replicate_path/peptide_prophet.job
+		if [ -r $peptide_prophet_job ]
+		then
+			if [ $SILENT -eq 0 ]
+			then
+				echo "** found peptide prophet job file for $REP_PATH"
+			fi
+			# if the job file exists look for the log
+			peptide_prophet_joblog=$replicate_path/peptide_prophet.log
+			if [ -r $peptide_prophet_joblog ]
+			then
+				if [ $SILENT -eq 0 ]
+				then
+					echo "** found peptide prophet job log for $REP_PATH, checking if it is old enough to import"
+				fi
+				# if log file exists and it is older than 60 minutes load this info
+				joblog_time=`stat -f "%c" $peptide_prophet_joblog`
+				if [ $(((now-joblog_time) / 60)) -gt 60 ]
+				then
+					if [ $SILENT -eq 0 ]
+					then
+						echo "** looking for protein prohpet job file for $REP_PATH"
+					fi
+					echo "CALL condition_replicate_catalog_peptide_prophet_job('$replicate_path', '$DATAROOT/$peptide_prophet_job', NOW(), '$DATAROOT/$peptide_prophet_joblog');" | mysql -s msmskit 
+					# look for the protein prophet job file
+					protein_prophet_job=$replicate_path/protein_prophet.job
+					if [ -r $protein_prophet_job ]
+					then
+						if [ $SILENT -eq 0 ]
+						then
+							echo "** found protein prophet job log for $REP_PATH, checking if it is old enough to import"
+						fi
+						protein_prophet_joblog=$replicate_path/protein_prophet.log
+						# if log file exists and it is older than 60 minutes load this info
+						joblog_time=`stat -f "%c" $protein_prophet_joblog`
+						if [ $(((now-joblog_time) / 60)) -gt 60 ]
+						then
+							if [ $SILENT -eq 0 ]
+							then
+								echo "** found everything for protein and peptide prophet for $REP_PATH, updating database"
+							fi
+							echo "CALL condition_replicate_catalog_protein_prophet_job('$replicate_path', '$DATAROOT/$protein_prophet_job', NOW(), '$DATAROOT/$protein_prophet_joblog');" | mysql -s msmskit
+						fi
+					fi
+				else
+					if [ $SILENT -eq 0 ]
+					then
+						echo "** looks like protein prophet is running for $REP_PATH"
+					fi
+					echo "CALL condition_replicate_catalog_set_analysis_running('$replicate_path');" | mysql -s msmskit
+				fi
+			fi
+		fi
+	else
+		if [ $SILENT -eq 0 ]
+		then
+			echo "!! for experiment $EXP_PATH condition $COND_PATH, the replicate $REP_PATH does not have a replicate_info.txt file present"
+		fi
+	fi
+else
+	if [ $SILENT -eq 0 ]
+	then
+		echo "** already found $replicate_path"
+	fi
+fi
